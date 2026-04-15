@@ -1,23 +1,21 @@
-# ===== IMPORT =====
-import os, time
-from html import escape
-from datetime import datetime, timedelta
+import os
+import time
+from datetime import datetime
 from contextlib import asynccontextmanager
-from zoneinfo import ZoneInfo
-from urllib.parse import urlencode
 
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
-import uvicorn
 
-from db import *
+from db import (
+    init_db,
+    get_transactions,
+    get_dashboard_stats
+)
 
 # ===== ENV =====
 load_dotenv()
-WEB_TOKEN = (os.getenv("WEB_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8080"))
-BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 # ===== APP =====
 @asynccontextmanager
@@ -27,170 +25,200 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ===== AUTH =====
-def require_token(token):
-    if WEB_TOKEN and token != WEB_TOKEN:
-        raise HTTPException(401)
+# ================= API CHART =================
+@app.get("/api/chart")
+def chart_data():
+    txs = get_transactions()
 
-# ===== UI CORE =====
-def page_shell(title, body):
-    return HTMLResponse(f"""
-<!DOCTYPE html>
+    daily = {}
+
+    for t in txs:
+        ts = t[1]
+        amount = t[8] or 0
+
+        day = datetime.fromtimestamp(ts).strftime("%m-%d")
+        daily[day] = daily.get(day, 0) + amount
+
+    labels = list(daily.keys())[-7:]
+    values = list(daily.values())[-7:]
+
+    return {"labels": labels, "values": values}
+
+
+# ================= UI =================
+def page_shell(title: str, body_html: str):
+    html = f"""
+<!doctype html>
 <html>
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
 <title>{title}</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
 body {{
     margin:0;
-    font-family:Arial;
-    background:#0b1120;
-    color:white;
-    display:flex;
+    font-family:Inter;
+    background:#020617;
+    color:#e2e8f0;
 }}
+
+.layout {{display:flex;}}
 
 .sidebar {{
-    width:230px;
+    width:240px;
     background:#020617;
     padding:20px;
+    position:fixed;
+    height:100%;
 }}
 
-.logo {{
-    font-size:20px;
-    font-weight:bold;
-    margin-bottom:20px;
+.sidebar a {{
+    display:block;
+    padding:10px;
+    color:#94a3b8;
+    text-decoration:none;
 }}
 
-.menu div {{
-    padding:12px;
-    border-radius:10px;
-    margin-bottom:10px;
-    color:#9ca3af;
-}}
-
-.menu div:hover {{
+.sidebar a:hover {{
     background:#1e293b;
     color:white;
 }}
 
 .main {{
-    flex:1;
+    margin-left:240px;
     padding:20px;
-}}
-
-.cards {{
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:15px;
+    width:100%;
 }}
 
 .card {{
+    background:#0f172a;
     padding:20px;
-    border-radius:16px;
+    border-radius:12px;
+    margin:10px;
+}}
+
+.value {{
+    font-size:28px;
     font-weight:bold;
 }}
 
-.c1 {{background:linear-gradient(45deg,#ff6b6b,#ff3b3b);}}
-.c2 {{background:linear-gradient(45deg,#3b82f6,#2563eb);}}
-.c3 {{background:linear-gradient(45deg,#a855f7,#7c3aed);}}
-.c4 {{background:linear-gradient(45deg,#22c55e,#16a34a);}}
+.stats {{
+    display:flex;
+}}
 
 .chart {{
-    margin-top:30px;
-    background:#020617;
-    padding:20px;
-    border-radius:16px;
+    margin-top:20px;
 }}
 </style>
 </head>
 
 <body>
 
+<div class="layout">
+
 <div class="sidebar">
-    <div class="logo">🚀 BOT</div>
-    <div class="menu">
-        <div>Dashboard</div>
-        <div>Orders</div>
-        <div>Users</div>
-        <div>Groups</div>
-    </div>
+    <h2>VIP PANEL</h2>
+    <a href="/">Dashboard</a>
 </div>
 
 <div class="main">
-{body}
+
+<h1>{title}</h1>
+
+{body_html}
+
+<div class="chart">
+<canvas id="chart"></canvas>
 </div>
+
+</div>
+</div>
+
+<script>
+// ===== số chạy =====
+document.querySelectorAll(".value").forEach(el=>{
+    let target = parseInt(el.getAttribute("data-value"));
+    let count = 0;
+    let step = target / 40;
+
+    let i = setInterval(()=>{
+        count += step;
+        if(count >= target){
+            count = target;
+            clearInterval(i);
+        }
+        el.innerText = Math.floor(count);
+    },20);
+});
+
+// ===== chart realtime =====
+let chart;
+
+async function loadChart() {
+    const res = await fetch("/api/chart");
+    const data = await res.json();
+
+    if(chart) {
+        chart.data.labels = data.labels;
+        chart.data.datasets[0].data = data.values;
+        chart.update();
+        return;
+    }
+
+    chart = new Chart(document.getElementById('chart'), {
+        type: 'line',
+        data: {
+            labels: data.labels,
+            datasets: [{
+                data: data.values,
+                fill:true,
+                tension:0.4
+            }]
+        },
+        options: {
+            plugins: { legend: { display:false } }
+        }
+    });
+}
+
+loadChart();
+setInterval(loadChart, 5000);
+</script>
 
 </body>
 </html>
-""")
+"""
+    return HTMLResponse(html)
 
-# ===== DASHBOARD =====
-@app.get("/dashboard")
-def dashboard(token: str | None = Query(None)):
-    require_token(token)
 
+# ================= MAIN PAGE =================
+@app.get("/")
+def dashboard():
     stats = get_dashboard_stats()
 
     body = f"""
-    <h1>Dashboard</h1>
+<div class="stats">
 
-    <div class="cards">
-        <div class="card c1">Users<br>{stats["total_users"]}</div>
-        <div class="card c2">Active<br>{stats["active_users"]}</div>
-        <div class="card c3">Permanent<br>{stats["permanent_users"]}</div>
-        <div class="card c4">Orders<br>{stats["pending_orders"]}</div>
-    </div>
+<div class="card">
+<div>Total Income</div>
+<div class="value" data-value="{int(stats.get('total_income_unit',0))}">0</div>
+</div>
 
-    <div class="chart">
-        <canvas id="chart"></canvas>
-    </div>
+<div class="card">
+<div>Total Payout</div>
+<div class="value" data-value="{int(stats.get('total_payout_unit',0))}">0</div>
+</div>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>
-    new Chart(document.getElementById('chart'),{{
-        type:'bar',
-        data:{{
-            labels:['Jan','Feb','Mar','Apr'],
-            datasets:[{{label:'Orders',data:[10,20,30,40]}}]
-        }}
-    }})
-    </script>
-    """
+<div class="card">
+<div>Users</div>
+<div class="value" data-value="{int(stats.get('user_count',0))}">0</div>
+</div>
+
+</div>
+"""
 
     return page_shell("Dashboard", body)
-
-# ===== USERS =====
-@app.get("/users")
-def users(token: str | None = Query(None)):
-    require_token(token)
-
-    rows = get_access_users_page(limit=50, offset=0)
-
-    html = ""
-    for u in rows:
-        html += f"<tr><td>{u[0]}</td><td>{u[1]}</td></tr>"
-
-    return page_shell("Users", f"<table>{html}</table>")
-
-# ===== ORDERS (FIX LỖI) =====
-@app.get("/orders")
-def orders(token: str | None = Query(None)):
-    require_token(token)
-
-    rows = get_rental_orders_by_status(None)
-
-    html = ""
-    for r in rows:
-        html += f"<tr><td>{r[0]}</td><td>{r[6]}</td></tr>"
-
-    return page_shell("Orders", f"<table>{html}</table>")
-
-# ===== ROOT =====
-@app.get("/")
-def home(token: str | None = Query(None)):
-    return RedirectResponse("/dashboard")
-
-# ===== RUN =====
-if __name__ == "__main__":
-    uvicorn.run("web:app", host="0.0.0.0", port=PORT)
