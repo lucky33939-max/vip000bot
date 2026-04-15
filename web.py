@@ -1,41 +1,23 @@
 # ===== IMPORT =====
-import os, time, json, asyncio
+import os, time
 from html import escape
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Query, HTTPException, Form, WebSocket
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 from dotenv import load_dotenv
 import uvicorn
-
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Image
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-import qrcode
 
 from db import *
 
 # ===== ENV =====
 load_dotenv()
+WEB_TOKEN = (os.getenv("WEB_TOKEN") or "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
-
-# ===== SESSION FILE =====
-SESSION_FILE = "sessions.json"
-
-def load_sessions():
-    try:
-        return json.load(open(SESSION_FILE))
-    except:
-        return {}
-
-def save_sessions(s):
-    json.dump(s, open(SESSION_FILE,"w"))
-
-SESSIONS = load_sessions()
 
 # ===== APP =====
 @asynccontextmanager
@@ -45,130 +27,170 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ===== LOGIN =====
-@app.get("/login", response_class=HTMLResponse)
-def login_page():
-    return """
-    <form method="post" style="padding:80px">
-        <h2>VIP LOGIN</h2>
-        <input name="user"><br><br>
-        <input name="password" type="password"><br><br>
-        <button>Login</button>
-    </form>
-    """
-
-@app.post("/login")
-def do_login(user: str = Form(...), password: str = Form(...)):
-    if user=="vip" and password=="000":
-        token=str(time.time())
-        SESSIONS[token]=True
-        save_sessions(SESSIONS)
-        return RedirectResponse(f"/vip000.bot?session={token}",303)
-    return HTMLResponse("Login fail",401)
-
-def require_login(session):
-    if session not in SESSIONS:
+# ===== AUTH =====
+def require_token(token):
+    if WEB_TOKEN and token != WEB_TOKEN:
         raise HTTPException(401)
 
-# ===== DASHBOARD =====
-def page(body):
+# ===== UI CORE =====
+def page_shell(title, body):
     return HTMLResponse(f"""
-    <html>
-    <head>
-    <style>
-    body{{background:#0f172a;color:white;font-family:Arial}}
-    .card{{padding:20px;margin:10px;background:#1e293b;border-radius:16px;
-    box-shadow:0 0 30px rgba(37,99,235,.3)}}
-    </style>
-    </head>
-    <body>{body}</body>
-    </html>
-    """)
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>{title}</title>
 
-@app.get("/vip000.bot")
-def dashboard(session: str = Query(None)):
-    require_login(session)
+<style>
+body {{
+    margin:0;
+    font-family:Arial;
+    background:#0b1120;
+    color:white;
+    display:flex;
+}}
+
+.sidebar {{
+    width:230px;
+    background:#020617;
+    padding:20px;
+}}
+
+.logo {{
+    font-size:20px;
+    font-weight:bold;
+    margin-bottom:20px;
+}}
+
+.menu div {{
+    padding:12px;
+    border-radius:10px;
+    margin-bottom:10px;
+    color:#9ca3af;
+}}
+
+.menu div:hover {{
+    background:#1e293b;
+    color:white;
+}}
+
+.main {{
+    flex:1;
+    padding:20px;
+}}
+
+.cards {{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:15px;
+}}
+
+.card {{
+    padding:20px;
+    border-radius:16px;
+    font-weight:bold;
+}}
+
+.c1 {{background:linear-gradient(45deg,#ff6b6b,#ff3b3b);}}
+.c2 {{background:linear-gradient(45deg,#3b82f6,#2563eb);}}
+.c3 {{background:linear-gradient(45deg,#a855f7,#7c3aed);}}
+.c4 {{background:linear-gradient(45deg,#22c55e,#16a34a);}}
+
+.chart {{
+    margin-top:30px;
+    background:#020617;
+    padding:20px;
+    border-radius:16px;
+}}
+</style>
+</head>
+
+<body>
+
+<div class="sidebar">
+    <div class="logo">🚀 BOT</div>
+    <div class="menu">
+        <div>Dashboard</div>
+        <div>Orders</div>
+        <div>Users</div>
+        <div>Groups</div>
+    </div>
+</div>
+
+<div class="main">
+{body}
+</div>
+
+</body>
+</html>
+""")
+
+# ===== DASHBOARD =====
+@app.get("/dashboard")
+def dashboard(token: str | None = Query(None)):
+    require_token(token)
 
     stats = get_dashboard_stats()
 
-    body=f"""
-    <h1>VIP DASHBOARD</h1>
+    body = f"""
+    <h1>Dashboard</h1>
 
-    <div class="card">Users: {stats["total_users"]}</div>
-    <div class="card">Active: {stats["active_users"]}</div>
-
-    <div class="card">
-    <a href="/export/pdf">🧾 Export PDF</a>
+    <div class="cards">
+        <div class="card c1">Users<br>{stats["total_users"]}</div>
+        <div class="card c2">Active<br>{stats["active_users"]}</div>
+        <div class="card c3">Permanent<br>{stats["permanent_users"]}</div>
+        <div class="card c4">Orders<br>{stats["pending_orders"]}</div>
     </div>
 
-    <div class="card">
-    <canvas id="chart"></canvas>
+    <div class="chart">
+        <canvas id="chart"></canvas>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
-    fetch('/api/stats').then(r=>r.json()).then(d=>{
-        new Chart(document.getElementById('chart'),{{
-            type:'bar',
-            data:{{
-                labels:d.map(x=>x.date),
-                datasets:[{{label:'Income',data:d.map(x=>x.value)}}]
-            }}
-        })
-    })
+    new Chart(document.getElementById('chart'),{{
+        type:'bar',
+        data:{{
+            labels:['Jan','Feb','Mar','Apr'],
+            datasets:[{{label:'Orders',data:[10,20,30,40]}}]
+        }}
+    }})
     </script>
     """
 
-    return page(body)
+    return page_shell("Dashboard", body)
 
-# ===== API =====
-@app.get("/api/stats")
-def stats():
-    now=datetime.now(BEIJING_TZ)
-    arr=[]
-    for i in range(7):
-        arr.append({"date":str(i),"value":i*10})
-    return arr
+# ===== USERS =====
+@app.get("/users")
+def users(token: str | None = Query(None)):
+    require_token(token)
 
-# ===== PDF =====
-@app.get("/export/pdf")
-def export_pdf():
-    path="/mnt/data/vip.pdf"
-    doc=SimpleDocTemplate(path)
-    el=[]
+    rows = get_access_users_page(limit=50, offset=0)
 
-    el.append(Paragraph("VIP REPORT", getSampleStyleSheet()["Title"]))
+    html = ""
+    for u in rows:
+        html += f"<tr><td>{u[0]}</td><td>{u[1]}</td></tr>"
 
-    qr=qrcode.make("VIP VERIFY")
-    qr.save("/mnt/data/qr.png")
-    el.append(Image("/mnt/data/qr.png",100,100))
+    return page_shell("Users", f"<table>{html}</table>")
 
-    data=[["User","Amount"]]
-    txs=get_transactions(None)
-    for t in txs:
-        data.append([str(t[3]),str(t[8])])
+# ===== ORDERS (FIX LỖI) =====
+@app.get("/orders")
+def orders(token: str | None = Query(None)):
+    require_token(token)
 
-    table=Table(data)
-    table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),1,colors.black)]))
+    rows = get_rental_orders_by_status(None)
 
-    el.append(table)
-    doc.build(el)
+    html = ""
+    for r in rows:
+        html += f"<tr><td>{r[0]}</td><td>{r[6]}</td></tr>"
 
-    return FileResponse(path)
-
-# ===== WS =====
-@app.websocket("/ws")
-async def ws(ws:WebSocket):
-    await ws.accept()
-    while True:
-        await ws.send_json(get_dashboard_stats())
-        await asyncio.sleep(3)
+    return page_shell("Orders", f"<table>{html}</table>")
 
 # ===== ROOT =====
 @app.get("/")
-def home():
-    return RedirectResponse("/login")
+def home(token: str | None = Query(None)):
+    return RedirectResponse("/dashboard")
 
 # ===== RUN =====
 if __name__ == "__main__":
-    uvicorn.run("web_vip:app", host="0.0.0.0", port=PORT)
+    uvicorn.run("web:app", host="0.0.0.0", port=PORT)
