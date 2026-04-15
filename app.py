@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 from fastapi.responses import JSONResponse
-from fastapi import FastAPI, Request, HTTPExceptio
+from fastapi import FastAPI, Request, HTTPException
 from aiogram.types import Update
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
