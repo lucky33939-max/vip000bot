@@ -2889,17 +2889,23 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
 
+        print("UPDATE RECEIVED:", data)
+
         update = Update.model_validate(data)
 
-        await dp.feed_update(bot, update)
+        try:
+            await dp.feed_update(bot, update)
+        except Exception:
+            import traceback
+            print("❌ HANDLER ERROR:")
+            traceback.print_exc()
 
         return JSONResponse({"ok": True})
 
-    except Exception as e:
+    except Exception:
         import traceback
-        print("WEBHOOK ERROR:")
+        print("❌ WEBHOOK ERROR:")
         traceback.print_exc()
-
         return JSONResponse({"ok": False})
         
 @app.head("/healthz")
