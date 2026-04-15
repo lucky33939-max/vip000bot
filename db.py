@@ -334,3 +334,20 @@ def mark_rental_order_rejected(order_code):
     """, (order_code,))
     conn.commit()
     conn.close()
+    
+def get_all_button_configs():
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS button_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT,
+        url TEXT
+    )
+    """)
+
+    c.execute("SELECT text, url FROM button_configs")
+    rows = c.fetchall()
+    conn.close()
+    return rows
